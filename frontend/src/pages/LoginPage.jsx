@@ -12,23 +12,21 @@ function LoginPage({ onLogin }) {
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
-
+  
     try {
       const res = await api.post("/auth/login", {
         email,
         password,
       });
-
-      const user = res.data.user;
-
-      // store user in localStorage
+  
+      const user = res.data.user;  // 👈 this now exists
+  
       setCurrentUser(user);
-
-      // notify parent App (so navbar updates)
+  
       if (onLogin) {
         onLogin(user);
       }
-
+  
       alert(`Logged in as ${user.name} (${user.role})`);
       navigate("/");
     } catch (err) {
@@ -40,6 +38,7 @@ function LoginPage({ onLogin }) {
       }
     }
   }
+  
 
   return (
     <div style={{ padding: "1.5rem" }}>

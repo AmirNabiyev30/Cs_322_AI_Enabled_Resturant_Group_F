@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 
 from extensions import db
-from models import Dish
+from models import Dish, User   # 👈 add User
 
 menu_bp = Blueprint("menu", __name__, url_prefix="/api/menu")
 
@@ -20,6 +20,8 @@ def get_menu():
                 "price": d.price,
                 "image_url": d.image_url,
                 "is_vip_only": d.is_vip_only,
+                "chef_id": d.chef_id,                          # 👈 new
+                "chef_name": d.chef.name if d.chef else None,  # 👈 new
             }
         )
 
@@ -38,6 +40,7 @@ def create_dish():
     description = data.get("description", "").strip()
     price = data.get("price")
     is_vip_only = bool(data.get("is_vip_only", False))
+    chef_id = data.get("chef_id")  # 👈 optional
 
     if not name or not description or price is None:
         return jsonify({"error": "name, description, price are required"}), 400
@@ -47,11 +50,21 @@ def create_dish():
     except ValueError:
         return jsonify({"error": "price must be a number"}), 400
 
+    # If a chef_id was provided, make sure it exists and is a chef
+    chef = None
+    if chef_id is not None:
+        chef = User.query.get(chef_id)
+        if not chef:
+            return jsonify({"error": f"Chef with id {chef_id} not found"}), 400
+        if chef.role not in ("chef", "junior_chef"):
+            return jsonify({"error": "Given user is not a chef"}), 400
+
     dish = Dish(
         name=name,
         description=description,
         price=price,
         is_vip_only=is_vip_only,
+        chef_id=chef.id if chef else None,
     )
 
     db.session.add(dish)
@@ -68,6 +81,8 @@ def create_dish():
                     "price": dish.price,
                     "image_url": dish.image_url,
                     "is_vip_only": dish.is_vip_only,
+                    "chef_id": dish.chef_id,
+                    "chef_name": dish.chef.name if dish.chef else None,
                 },
             }
         ),

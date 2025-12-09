@@ -1,29 +1,47 @@
 from flask import Blueprint, request, jsonify
 
 from extensions import db
-from models import User, Dish, Order, OrderItem
+from models import User, Dish, Order, OrderItem, DeliveryJob, Feedback
 
 order_bp = Blueprint("orders", __name__, url_prefix="/api/orders")
 
 
-def maybe_update_vip_status(user):
+def maybe_update_vip_status(user: User) -> bool:
     """
-    Promote a user to VIP based on simple rules.
-    Returns True if the user was just promoted.
-    """
+    Promote a registered customer to VIP if:
+      - user.role == 'customer'
+      - total_spent > 100  OR  order_count >= 3
+      - and there are NO outstanding complaints
+        (complaints with status 'pending' or 'upheld')
 
-    # Already VIP? Nothing to do.
-    if user.role == "vip":
+    Returns True if the user was just promoted in this call, else False.
+    """
+    # Only registered customers can be promoted
+    if user.role != "customer":
         return False
 
-    # Example rules:
-    # - total_spent >= 200 OR
-    # - order_count >= 5
-    if user.total_spent >= 200 or user.order_count >= 5:
+    # Check for outstanding complaints about this user
+    active_complaints = Feedback.query.filter(
+        Feedback.target_user_id == user.id,
+        Feedback.type == "complaint",
+        Feedback.status.in_(["pending", "upheld"]),
+    ).count()
+
+    if active_complaints > 0:
+        # Spec: must have no outstanding complaints
+        return False
+
+    # Business rule: more than $100 OR at least 3 orders
+    qualifies_by_spend = user.total_spent > 100
+    qualifies_by_orders = user.order_count >= 3
+
+    if qualifies_by_spend or qualifies_by_orders:
         user.role = "vip"
+        # you can choose to clear warnings on promotion or not; I’ll leave them as-is
         return True
 
     return False
+
 
 
 @order_bp.route("/", methods=["POST"])
@@ -68,7 +86,7 @@ def create_order():
     if missing:
         return jsonify({"error": f"Unknown dish_id(s): {missing}"}), 400
 
-    # Calculate total price and enforce VIP-only rules
+    # Calculate subtotal and enforce VIP-only rules
     subtotal = 0.0
     normalized_items = []
     vip_only_dish_ids = []
@@ -84,7 +102,7 @@ def create_order():
         # If dish is VIP-only and user is NOT VIP, block the order
         if dish.is_vip_only and user.role != "vip":
             vip_only_dish_ids.append(dish_id)
-            continue  # we can accumulate then fail later (or fail immediately)
+            continue
 
         subtotal += dish.price * quantity
         normalized_items.append((dish, quantity))
@@ -98,21 +116,49 @@ def create_order():
             }
         ), 403
 
-
-    # VIP discount: 5% for VIP customers
+    # ---------- 3) 5% discount for VIP customers ----------
     discount = 0.0
     if user.role == "vip":
         discount = round(subtotal * 0.05, 2)
 
     total = subtotal - discount
+    # -----------------------------------------------------
 
-    # Check balance
+    # Check balance + reckless warning logic
     if user.deposit_balance < total:
+        user.warnings += 1
+
+        message = (
+            "Insufficient balance for this order; "
+            "you have received a warning for reckless ordering."
+        )
+
+        # VIP demotion rule
+        if user.role == "vip" and user.warnings >= 2:
+            user.role = "customer"
+            user.warnings = 0  # warnings cleared on demotion
+            message += " You have been demoted from VIP to regular customer."
+
+        # Registered customer kick-out rule
+        elif user.role == "customer" and user.warnings >= 3:
+            user.is_active = False
+            user.is_blacklisted = True
+            message += (
+                " You have been deregistered and blacklisted after 3 warnings."
+            )
+
+        db.session.commit()
+
         return jsonify(
             {
                 "error": "Insufficient balance",
+                "message": message,
                 "required": total,
                 "current_balance": user.deposit_balance,
+                "warnings": user.warnings,
+                "role": user.role,
+                "is_active": user.is_active,
+                "is_blacklisted": user.is_blacklisted,
             }
         ), 400
 
@@ -137,15 +183,24 @@ def create_order():
 
     # Update user stats
     user.deposit_balance -= total
-    user.total_spent += total
+    user.total_spent += total      # while still 'customer', total == subtotal
     user.order_count += 1
 
-    # VIP promotion
+    # VIP promotion logic (spend > 100 or 3 orders, no outstanding complaints)
     just_promoted = maybe_update_vip_status(user)
+
+    # Automatically create a delivery job for this paid order
+    delivery_job = DeliveryJob(
+        order_id=order.id,
+        customer_id=user.id,
+        delivery_address="160 Convent Avenue",  # TODO: tie to real address
+        delivery_notes=None,
+        status="open",
+    )
+    db.session.add(delivery_job)
 
     db.session.commit()
 
-    # Build response
     return jsonify(
         {
             "message": "Order created",
@@ -154,7 +209,7 @@ def create_order():
                 "customer_id": order.customer_id,
                 "status": order.status,
                 "subtotal": subtotal,
-                "discount": discount,
+                "discount": discount,   # 👈 front-end can show 5% here
                 "total": total,
                 "items": [
                     {
@@ -176,7 +231,7 @@ def create_order():
 
 @order_bp.route("/user/<int:user_id>", methods=["GET"])
 def list_orders_for_user(user_id):
-    """Simple endpoint to fetch all orders for a given user_id."""
+    """Fetch all orders for a given user, including dish + chef info for rating."""
     user = User.query.get(user_id)
     if not user:
         return jsonify({"error": "User not found"}), 404
@@ -189,6 +244,24 @@ def list_orders_for_user(user_id):
 
     data = []
     for o in orders:
+        items_data = []
+        for item in o.items:
+            dish = item.dish  # relationship from OrderItem -> Dish
+            chef = dish.chef if dish else None
+
+            items_data.append(
+                {
+                    "dish_id": item.dish_id,
+                    "quantity": item.quantity,
+                    "unit_price": item.unit_price,
+                    # Extra fields for UI & rating:
+                    "dish_name": dish.name if dish else f"Dish {item.dish_id}",
+                    "dish_image_url": dish.image_url if dish else None,
+                    "chef_id": chef.id if chef else None,
+                    "chef_name": chef.name if chef else None,
+                }
+            )
+
         data.append(
             {
                 "id": o.id,
@@ -196,14 +269,7 @@ def list_orders_for_user(user_id):
                 "total_price": o.total_price,
                 "discount_applied": o.discount_applied,
                 "created_at": o.created_at.isoformat(),
-                "items": [
-                    {
-                        "dish_id": item.dish_id,
-                        "quantity": item.quantity,
-                        "unit_price": item.unit_price,
-                    }
-                    for item in o.items
-                ],
+                "items": items_data,
             }
         )
 

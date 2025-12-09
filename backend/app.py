@@ -35,6 +35,15 @@ def create_app():
     from routes.wallet_routes import wallet_bp
     from routes.admin_routes import admin_bp
     from routes.assistant_routes import assistant_bp
+    from routes.delivery_routes import delivery_bp
+    from routes.reputation_routes import reputation_bp
+    from routes.knowledge_routes import knowledge_bp
+    from routes.manager_routes import manager_bp
+    from routes.discussion_routes import discussion_bp
+
+
+
+
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(menu_bp)
@@ -42,6 +51,11 @@ def create_app():
     app.register_blueprint(wallet_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(assistant_bp)
+    app.register_blueprint(delivery_bp)
+    app.register_blueprint(reputation_bp)
+    app.register_blueprint(knowledge_bp)
+    app.register_blueprint(manager_bp)
+    app.register_blueprint(discussion_bp)
 
 
 
